@@ -10,3 +10,4 @@ pymongo
 SQLAlchemy
 psycopg2-binary
 pyshorteners==1.0.1
+googletrans==4.0.0rc1
