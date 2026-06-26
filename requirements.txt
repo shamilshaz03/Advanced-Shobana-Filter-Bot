@@ -3,6 +3,7 @@ tgcrypto
 motor
 dnspython
 aiohttp
+requests
 pytz
 jinja2
 pymongo

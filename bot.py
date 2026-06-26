@@ -13,6 +13,7 @@ logging.getLogger("asyncio").setLevel(logging.CRITICAL)
 
 import tgcrypto
 from pyrogram import Client, __version__
+from pyrogram.errors import FloodWait
 from pyrogram.types import BotCommand
 from pyrogram.raw.all import layer
 from pyrogram import utils as pyroutils
@@ -67,6 +68,20 @@ async def keep_alive():
             except Exception:
                 pass
             await asyncio.sleep(111)
+
+
+async def safe_start_bot(bot):
+    while True:
+        try:
+            await bot.start()
+            return
+        except FloodWait as e:
+            wait_for = getattr(e, "value", None) or getattr(e, "x", None) or 0
+            wait_for = int(wait_for) + 5
+            logging.warning(
+                f"FloodWait during bot startup, retrying after {wait_for} seconds"
+            )
+            await asyncio.sleep(wait_for)
 
 
 class Bot(Client):
@@ -147,7 +162,7 @@ async def main():
     logging.info(f"Web server listening on 0.0.0.0:{port}")
 
     bot = Bot()
-    await bot.start()
+    await safe_start_bot(bot)
 
     try:
         from pyrogram import idle
