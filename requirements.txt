@@ -9,3 +9,4 @@ jinja2
 pymongo
 SQLAlchemy
 psycopg2-binary
+pyshorteners==1.0.1
