@@ -10,7 +10,11 @@ from pyrogram.types import (
     InlineKeyboardButton, InlineKeyboardMarkup, Message, CallbackQuery
 )
 
-from database.ia_filterdb import get_search_results
+try:
+    from database.ia_filterdb import get_search_results
+except Exception:  # pragma: no cover - allows import in lightweight test environments
+    get_search_results = None
+
 from database.users_chats_db import db
 from info import (
     ADMINS, AUTH_GROUPS, P_TTI_SHOW_OFF, PROTECT_CONTENT,
@@ -118,7 +122,75 @@ def _uniq(it):
     return [x for x in it if not (x in seen or seen.add(x))]
 
 
+def _slugify(value) -> str:
+    return re.sub(r'[^a-z0-9]+', '_', str(value).strip().lower()).strip('_')
+
+
+def _parse_callback_data(data: str):
+    if not data:
+        return {}
+
+    if '|' in data:
+        parts = data.split('|')
+        action = parts[0]
+        if action == 'sf' and len(parts) >= 4:
+            return {'action': 'sf', 'chat_id': int(parts[1]), 'msg_id': int(parts[2]), 'value': parts[3]}
+        if action in {'page', 'pginfo', 'back'} and len(parts) >= 3:
+            payload = {'action': action, 'chat_id': int(parts[1]), 'msg_id': int(parts[2])}
+            if len(parts) >= 4:
+                payload['value'] = parts[3]
+            return payload
+        if action in {'slang', 'squal', 'sseason', 'sep'} and len(parts) >= 4:
+            return {'action': action, 'chat_id': int(parts[1]), 'msg_id': int(parts[2]), 'value': parts[3]}
+        if action in {'stream', 'download'} and len(parts) >= 2:
+            return {'action': action, 'value': parts[1]}
+        return {'action': action}
+
+    if data in {'prev', 'next', 'lang', 'quality', 'season', 'episode', 'back'}:
+        return {'action': data}
+    if data.startswith('lang_'):
+        return {'action': 'lang', 'value': data.split('_', 1)[1]}
+    if data.startswith('quality_'):
+        return {'action': 'quality', 'value': data.split('_', 1)[1]}
+    if data.startswith('season_'):
+        return {'action': 'season', 'value': data.split('_', 1)[1]}
+    if data.startswith('episode_'):
+        return {'action': 'episode', 'value': data.split('_', 1)[1]}
+    if data.startswith('page_'):
+        return {'action': 'page', 'value': data.split('_', 1)[1]}
+    if data.startswith('stream_'):
+        return {'action': 'stream', 'value': data.split('_', 1)[1]}
+    if data.startswith('download_'):
+        return {'action': 'download', 'value': data.split('_', 1)[1]}
+    return {'action': data}
+
+
 # ─── Keyboard builder ─────────────────────────────────────────────────────────
+def _build_filter_menu(state: dict, msg_id: int, chat_id: int, kind: str) -> InlineKeyboardMarkup:
+    current = state.get(kind)
+    if kind == 'lang':
+        options = [l for l in _uniq([_extract_lang(f.file_name or '') for f in state['all_files']]) if l]
+    elif kind == 'quality':
+        options = [q for q in _uniq([_extract_qual(f.file_name or '') for f in _apply(state['all_files'], lang=state.get('lang'))]) if q]
+    elif kind == 'season':
+        options = sorted(set(s for f in _apply(state['all_files'], lang=state.get('lang'), qual=state.get('qual')) if (s := _extract_season(f.file_name or ''))))
+    elif kind == 'episode':
+        options = sorted(set(e for f in _apply(state['all_files'], lang=state.get('lang'), qual=state.get('qual'), season=state.get('season')) if (e := _extract_ep(f.file_name or ''))))
+    else:
+        options = []
+
+    rows = []
+    for value in options:
+        rows.append([InlineKeyboardButton(
+            ("✅ " if current == value else "") + value,
+            callback_data=f"{kind}_{_slugify(value)}"
+        )])
+    if current:
+        rows.append([InlineKeyboardButton("❌ Clear", callback_data=f"{kind}_clear")])
+    rows.append([InlineKeyboardButton("« Back", callback_data="back")])
+    return InlineKeyboardMarkup(rows)
+
+
 def _build_kb(state: dict, msg_id: int, chat_id: int) -> InlineKeyboardMarkup:
     lang = state.get('lang')
     qual = state.get('qual')
@@ -148,14 +220,14 @@ def _build_kb(state: dict, msg_id: int, chat_id: int) -> InlineKeyboardMarkup:
     lang_lbl = f"🌍 {lang} ✅" if lang else "🌍 Language"
     qual_lbl = f"🎬 {qual} ✅" if qual else "🎬 Quality"
     rows.append([
-        InlineKeyboardButton(lang_lbl, callback_data=f"flang|{chat_id}|{msg_id}"),
-        InlineKeyboardButton(qual_lbl, callback_data=f"fqual|{chat_id}|{msg_id}"),
+        InlineKeyboardButton(lang_lbl, callback_data='lang'),
+        InlineKeyboardButton(qual_lbl, callback_data='quality'),
     ])
     season_lbl = f"📺 {season} ✅" if season else "📺 Season"
     ep_lbl = f"🎞 {ep} ✅" if ep else "🎞 Episode"
     rows.append([
-        InlineKeyboardButton(season_lbl, callback_data=f"fseason|{chat_id}|{msg_id}"),
-        InlineKeyboardButton(ep_lbl, callback_data=f"fep|{chat_id}|{msg_id}"),
+        InlineKeyboardButton(season_lbl, callback_data='season'),
+        InlineKeyboardButton(ep_lbl, callback_data='episode'),
     ])
 
     # ── Pagination ──
@@ -165,7 +237,7 @@ def _build_kb(state: dict, msg_id: int, chat_id: int) -> InlineKeyboardMarkup:
             nav.append(InlineKeyboardButton("◀", callback_data=f"page|{chat_id}|{msg_id}|{page - 1}"))
         nav.append(InlineKeyboardButton(
             f"{page + 1}/{total_pages}",
-            callback_data=f"pginfo|{chat_id}|{msg_id}"
+            callback_data=f"page|{chat_id}|{msg_id}|{page}"
         ))
         if page < total_pages - 1:
             nav.append(InlineKeyboardButton("▶", callback_data=f"page|{chat_id}|{msg_id}|{page + 1}"))
@@ -300,6 +372,8 @@ async def auto_filter(client: Client, message: Message):
 
     # Fetch ALL results (up to 200 for pagination)
     try:
+        if get_search_results is None:
+            raise RuntimeError("search backend unavailable")
         result = await get_search_results(query, max_results=200, offset=0)
         files = result[0]
         total = result[2]
@@ -347,264 +421,163 @@ async def auto_filter(client: Client, message: Message):
 
 # ─── Callbacks ────────────────────────────────────────────────────────────────
 
+async def _refresh_results_markup(client: Client, q: CallbackQuery, state: dict, chat_id: int, msg_id: int):
+    try:
+        await q.message.edit_reply_markup(_build_kb(state, msg_id, chat_id))
+    except MessageNotModified:
+        pass
+    except Exception as e:
+        logger.exception("Failed to refresh results for callback %s", q.data)
+        await q.answer("Something went wrong while refreshing the results.", show_alert=True)
+        raise
+
+
 # Select file
 @Client.on_callback_query(filters.regex(r"^sf\|"))
 async def cb_sf(client: Client, q: CallbackQuery):
-    parts = q.data.split("|")
-    if len(parts) < 4:
-        return await q.answer("Invalid", show_alert=True)
-    _, chat_id, msg_id, idx = parts[0], int(parts[1]), int(parts[2]), int(parts[3])
-
-    state = _get_state(chat_id, msg_id)
-    if not state:
-        return await q.answer("⚠️ Session expired. Search again.", show_alert=True)
-
-    filtered = _apply(state['all_files'], state.get('lang'), state.get('qual'),
-                      state.get('season'), state.get('ep'))
-    if idx >= len(filtered):
-        return await q.answer("File not found.", show_alert=True)
-
-    file_doc = filtered[idx]
-    await q.answer("📤 Sending...")
-    target = q.from_user.id if P_TTI_SHOW_OFF else q.message.chat.id
-    reply_to = q.message.id if not P_TTI_SHOW_OFF else None
-
-    asyncio.create_task(_send_file(client, target, reply_to, file_doc))
-
-
-# Language list
-@Client.on_callback_query(filters.regex(r"^flang\|"))
-async def cb_flang(client: Client, q: CallbackQuery):
-    _, chat_id, msg_id = q.data.split("|")
-    chat_id, msg_id = int(chat_id), int(msg_id)
-    state = _get_state(chat_id, msg_id)
-    if not state:
-        return await q.answer("⚠️ Session expired.", show_alert=True)
-
-    langs = _uniq([_extract_lang(f.file_name or '') for f in state['all_files']])
-    langs = [l for l in langs if l]
-    if not langs:
-        return await q.answer("No language tags found in results.", show_alert=True)
-
-    rows = [[InlineKeyboardButton(
-        ("✅ " if state.get('lang') == l else "") + l,
-        callback_data=f"slang|{chat_id}|{msg_id}|{l}"
-    )] for l in langs]
-    if state.get('lang'):
-        rows.append([InlineKeyboardButton("❌ Clear", callback_data=f"slang|{chat_id}|{msg_id}|__clear__")])
-    rows.append([InlineKeyboardButton("« Back", callback_data=f"back|{chat_id}|{msg_id}")])
     try:
-        await q.message.edit_reply_markup(InlineKeyboardMarkup(rows))
-    except MessageNotModified:
-        pass
-    await q.answer()
+        payload = _parse_callback_data(q.data)
+        logger.info("callback received: %s", q.data)
+        if payload.get('action') != 'sf':
+            return await q.answer("Invalid callback.", show_alert=True)
+
+        chat_id = int(payload['chat_id'])
+        msg_id = int(payload['msg_id'])
+        idx = int(payload['value'])
+        state = _get_state(chat_id, msg_id)
+        if not state:
+            return await q.answer("⚠️ Session expired. Search again.", show_alert=True)
+
+        filtered = _apply(state['all_files'], state.get('lang'), state.get('qual'),
+                          state.get('season'), state.get('ep'))
+        if idx >= len(filtered):
+            return await q.answer("File not found.", show_alert=True)
+
+        file_doc = filtered[idx]
+        await q.answer("📤 Sending...")
+        target = q.from_user.id if P_TTI_SHOW_OFF else q.message.chat.id
+        reply_to = q.message.id if not P_TTI_SHOW_OFF else None
+
+        asyncio.create_task(_send_file(client, target, reply_to, file_doc))
+    except Exception as e:
+        logger.exception("Failed to handle file selection callback %s", q.data)
+        await q.answer("Unable to send that file right now.", show_alert=True)
 
 
-@Client.on_callback_query(filters.regex(r"^slang\|"))
-async def cb_slang(client: Client, q: CallbackQuery):
-    parts = q.data.split("|", 4)
-    chat_id, msg_id, val = int(parts[1]), int(parts[2]), parts[3]
-    state = _get_state(chat_id, msg_id)
-    if not state:
-        return await q.answer("⚠️ Session expired.", show_alert=True)
-    state['lang'] = None if val == "__clear__" else val
-    state['page'] = 0
-    _save_state(chat_id, msg_id, state)
+# Language actions
+@Client.on_callback_query(filters.regex(r"^(?:lang|quality|season|episode)$"))
+async def cb_show_filter_menu(client: Client, q: CallbackQuery):
     try:
-        await q.message.edit_reply_markup(_build_kb(state, msg_id, chat_id))
-    except MessageNotModified:
-        pass
-    await q.answer(f"Language: {val if val != '__clear__' else 'cleared'}")
+        logger.info("callback received: %s", q.data)
+        kind = q.data
+        chat_id = q.message.chat.id
+        msg_id = q.message.id
+        state = _get_state(chat_id, msg_id)
+        if not state:
+            return await q.answer("⚠️ Session expired.", show_alert=True)
+        menu = _build_filter_menu(state, msg_id, chat_id, kind)
+        await q.message.edit_reply_markup(menu)
+        await q.answer(f"Loading {kind} filters...", show_alert=False)
+    except Exception as e:
+        logger.exception("Failed to show filter menu for %s", q.data)
+        await q.answer("Unable to open that filter menu right now.", show_alert=True)
 
 
-# Quality list
-@Client.on_callback_query(filters.regex(r"^fqual\|"))
-async def cb_fqual(client: Client, q: CallbackQuery):
-    _, chat_id, msg_id = q.data.split("|")
-    chat_id, msg_id = int(chat_id), int(msg_id)
-    state = _get_state(chat_id, msg_id)
-    if not state:
-        return await q.answer("⚠️ Session expired.", show_alert=True)
-
-    pool = _apply(state['all_files'], lang=state.get('lang'))
-    quals = _uniq([_extract_qual(f.file_name or '') for f in pool])
-    quals = [q_ for q_ in quals if q_]
-    if not quals:
-        return await q.answer("No quality tags found.", show_alert=True)
-
-    rows = [[InlineKeyboardButton(
-        ("✅ " if state.get('qual') == qv else "") + qv,
-        callback_data=f"squal|{chat_id}|{msg_id}|{qv}"
-    )] for qv in quals]
-    if state.get('qual'):
-        rows.append([InlineKeyboardButton("❌ Clear", callback_data=f"squal|{chat_id}|{msg_id}|__clear__")])
-    rows.append([InlineKeyboardButton("« Back", callback_data=f"back|{chat_id}|{msg_id}")])
+@Client.on_callback_query(filters.regex(r"^(?:lang|quality|season|episode)_(.+)$"))
+async def cb_apply_filter(client: Client, q: CallbackQuery):
     try:
-        await q.message.edit_reply_markup(InlineKeyboardMarkup(rows))
-    except MessageNotModified:
-        pass
-    await q.answer()
+        logger.info("callback received: %s", q.data)
+        kind, value = q.data.split('_', 1)
+        chat_id = q.message.chat.id
+        msg_id = q.message.id
+        state = _get_state(chat_id, msg_id)
+        if not state:
+            return await q.answer("⚠️ Session expired.", show_alert=True)
+
+        if kind == 'lang':
+            state['lang'] = None if value == 'clear' else value.replace('_', ' ')
+        elif kind == 'quality':
+            state['qual'] = None if value == 'clear' else value.replace('_', ' ')
+        elif kind == 'season':
+            state['season'] = None if value == 'clear' else value.replace('_', ' ')
+        elif kind == 'episode':
+            state['ep'] = None if value == 'clear' else value.replace('_', ' ')
+        state['page'] = 0
+        _save_state(chat_id, msg_id, state)
+        await _refresh_results_markup(client, q, state, chat_id, msg_id)
+        label = {
+            'lang': 'Language',
+            'quality': 'Quality',
+            'season': 'Season',
+            'episode': 'Episode',
+        }[kind]
+        await q.answer(f"{label}: {value.replace('_', ' ') if value != 'clear' else 'cleared'}")
+    except Exception as e:
+        logger.exception("Failed to apply filter callback %s", q.data)
+        await q.answer("Unable to apply that filter.", show_alert=True)
 
 
-@Client.on_callback_query(filters.regex(r"^squal\|"))
-async def cb_squal(client: Client, q: CallbackQuery):
-    parts = q.data.split("|", 4)
-    chat_id, msg_id, val = int(parts[1]), int(parts[2]), parts[3]
-    state = _get_state(chat_id, msg_id)
-    if not state:
-        return await q.answer("⚠️ Session expired.", show_alert=True)
-    state['qual'] = None if val == "__clear__" else val
-    state['page'] = 0
-    _save_state(chat_id, msg_id, state)
-    try:
-        await q.message.edit_reply_markup(_build_kb(state, msg_id, chat_id))
-    except MessageNotModified:
-        pass
-    await q.answer(f"Quality: {val if val != '__clear__' else 'cleared'}")
-
-
-# Season list
-@Client.on_callback_query(filters.regex(r"^fseason\|"))
-async def cb_fseason(client: Client, q: CallbackQuery):
-    _, chat_id, msg_id = q.data.split("|")
-    chat_id, msg_id = int(chat_id), int(msg_id)
-    state = _get_state(chat_id, msg_id)
-    if not state:
-        return await q.answer("⚠️ Session expired.", show_alert=True)
-
-    pool = _apply(state['all_files'], lang=state.get('lang'), qual=state.get('qual'))
-    seasons = sorted(set(s for f in pool if (s := _extract_season(f.file_name or ''))))
-    if not seasons:
-        return await q.answer("No season info found.", show_alert=True)
-
-    rows = [[InlineKeyboardButton(
-        ("✅ " if state.get('season') == s else "") + s,
-        callback_data=f"sseason|{chat_id}|{msg_id}|{s}"
-    )] for s in seasons]
-    if state.get('season'):
-        rows.append([InlineKeyboardButton("❌ Clear", callback_data=f"sseason|{chat_id}|{msg_id}|__clear__")])
-    rows.append([InlineKeyboardButton("« Back", callback_data=f"back|{chat_id}|{msg_id}")])
-    try:
-        await q.message.edit_reply_markup(InlineKeyboardMarkup(rows))
-    except MessageNotModified:
-        pass
-    await q.answer()
-
-
-@Client.on_callback_query(filters.regex(r"^sseason\|"))
-async def cb_sseason(client: Client, q: CallbackQuery):
-    parts = q.data.split("|", 4)
-    chat_id, msg_id, val = int(parts[1]), int(parts[2]), parts[3]
-    state = _get_state(chat_id, msg_id)
-    if not state:
-        return await q.answer("⚠️ Session expired.", show_alert=True)
-    state['season'] = None if val == "__clear__" else val
-    state['ep'] = None
-    state['page'] = 0
-    _save_state(chat_id, msg_id, state)
-    try:
-        await q.message.edit_reply_markup(_build_kb(state, msg_id, chat_id))
-    except MessageNotModified:
-        pass
-    await q.answer(f"Season: {val if val != '__clear__' else 'cleared'}")
-
-
-# Episode list
-@Client.on_callback_query(filters.regex(r"^fep\|"))
-async def cb_fep(client: Client, q: CallbackQuery):
-    _, chat_id, msg_id = q.data.split("|")
-    chat_id, msg_id = int(chat_id), int(msg_id)
-    state = _get_state(chat_id, msg_id)
-    if not state:
-        return await q.answer("⚠️ Session expired.", show_alert=True)
-
-    pool = _apply(state['all_files'], lang=state.get('lang'), qual=state.get('qual'),
-                  season=state.get('season'))
-    eps = sorted(set(e for f in pool if (e := _extract_ep(f.file_name or ''))))
-    if not eps:
-        return await q.answer("No episode info found.", show_alert=True)
-
-    rows, row = [], []
-    for ep in eps:
-        row.append(InlineKeyboardButton(
-            ("✅ " if state.get('ep') == ep else "") + ep,
-            callback_data=f"sep|{chat_id}|{msg_id}|{ep}"
-        ))
-        if len(row) == 3:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
-    if state.get('ep'):
-        rows.append([InlineKeyboardButton("❌ Clear", callback_data=f"sep|{chat_id}|{msg_id}|__clear__")])
-    rows.append([InlineKeyboardButton("« Back", callback_data=f"back|{chat_id}|{msg_id}")])
-    try:
-        await q.message.edit_reply_markup(InlineKeyboardMarkup(rows))
-    except MessageNotModified:
-        pass
-    await q.answer()
-
-
-@Client.on_callback_query(filters.regex(r"^sep\|"))
-async def cb_sep(client: Client, q: CallbackQuery):
-    parts = q.data.split("|", 4)
-    chat_id, msg_id, val = int(parts[1]), int(parts[2]), parts[3]
-    state = _get_state(chat_id, msg_id)
-    if not state:
-        return await q.answer("⚠️ Session expired.", show_alert=True)
-    state['ep'] = None if val == "__clear__" else val
-    state['page'] = 0
-    _save_state(chat_id, msg_id, state)
-    try:
-        await q.message.edit_reply_markup(_build_kb(state, msg_id, chat_id))
-    except MessageNotModified:
-        pass
-    await q.answer(f"Episode: {val if val != '__clear__' else 'cleared'}")
-
-
-# Pagination
-@Client.on_callback_query(filters.regex(r"^page\|"))
+# Pagination and info
+@Client.on_callback_query(filters.regex(r"^(?:prev|next|page_\d+)$"))
 async def cb_page(client: Client, q: CallbackQuery):
-    parts = q.data.split("|")
-    chat_id, msg_id, new_page = int(parts[1]), int(parts[2]), int(parts[3])
-    state = _get_state(chat_id, msg_id)
-    if not state:
-        return await q.answer("⚠️ Session expired.", show_alert=True)
-    state['page'] = new_page
-    _save_state(chat_id, msg_id, state)
     try:
-        await q.message.edit_reply_markup(_build_kb(state, msg_id, chat_id))
-    except MessageNotModified:
-        pass
-    await q.answer(f"Page {new_page + 1}")
+        logger.info("callback received: %s", q.data)
+        payload = _parse_callback_data(q.data)
+        if payload.get('action') not in {'page', 'prev', 'next'}:
+            return await q.answer("Invalid callback.", show_alert=True)
+
+        chat_id = q.message.chat.id
+        msg_id = q.message.id
+        state = _get_state(chat_id, msg_id)
+        if not state:
+            return await q.answer("⚠️ Session expired.", show_alert=True)
+
+        filtered = _apply(state['all_files'], state.get('lang'), state.get('qual'),
+                          state.get('season'), state.get('ep'))
+        total_pages = max(1, (len(filtered) + FILES_PER_PAGE - 1) // FILES_PER_PAGE)
+        if q.data == 'prev':
+            state['page'] = max(0, state.get('page', 0) - 1)
+        elif q.data == 'next':
+            state['page'] = min(total_pages - 1, state.get('page', 0) + 1)
+        else:
+            state['page'] = max(0, min(total_pages - 1, int(payload.get('value', 1)) - 1))
+        _save_state(chat_id, msg_id, state)
+        await _refresh_results_markup(client, q, state, chat_id, msg_id)
+        await q.answer(f"Page {state.get('page', 0) + 1}/{total_pages}")
+    except Exception as e:
+        logger.exception("Failed to handle pagination callback %s", q.data)
+        await q.answer("Unable to change page right now.", show_alert=True)
 
 
-@Client.on_callback_query(filters.regex(r"^pginfo\|"))
-async def cb_pginfo(client: Client, q: CallbackQuery):
-    parts = q.data.split("|")
-    chat_id, msg_id = int(parts[1]), int(parts[2])
-    state = _get_state(chat_id, msg_id)
-    if not state:
-        return await q.answer("Session expired", show_alert=True)
-    filtered = _apply(state['all_files'], state.get('lang'), state.get('qual'),
-                      state.get('season'), state.get('ep'))
-    total_pages = max(1, (len(filtered) + FILES_PER_PAGE - 1) // FILES_PER_PAGE)
-    await q.answer(
-        f"Page {state.get('page', 0) + 1}/{total_pages} • {len(filtered)} files",
-        show_alert=True,
-    )
-
-
-# Back to results
-@Client.on_callback_query(filters.regex(r"^back\|"))
+@Client.on_callback_query(filters.regex(r"^back(?:\||$)"))
 async def cb_back(client: Client, q: CallbackQuery):
-    parts = q.data.split("|")
-    chat_id, msg_id = int(parts[1]), int(parts[2])
-    state = _get_state(chat_id, msg_id)
-    if not state:
-        return await q.answer("⚠️ Session expired.", show_alert=True)
     try:
-        await q.message.edit_reply_markup(_build_kb(state, msg_id, chat_id))
-    except MessageNotModified:
-        pass
-    await q.answer()
+        logger.info("callback received: %s", q.data)
+        payload = _parse_callback_data(q.data)
+        if payload.get('action') not in {'back', 'pginfo'}:
+            return await q.answer("Invalid callback.", show_alert=True)
+
+        chat_id = q.message.chat.id
+        msg_id = q.message.id
+        state = _get_state(chat_id, msg_id)
+        if not state:
+            return await q.answer("⚠️ Session expired.", show_alert=True)
+        await _refresh_results_markup(client, q, state, chat_id, msg_id)
+        await q.answer()
+    except Exception as e:
+        logger.exception("Failed to handle back callback %s", q.data)
+        await q.answer("Unable to return to the results.", show_alert=True)
+
+
+@Client.on_callback_query(filters.regex(r"^(?:stream|download)_"))
+async def cb_stream_or_download(client: Client, q: CallbackQuery):
+    try:
+        logger.info("callback received: %s", q.data)
+        payload = _parse_callback_data(q.data)
+        if payload.get('action') not in {'stream', 'download'}:
+            return await q.answer("Invalid callback.", show_alert=True)
+        action = payload['action']
+        await q.answer(f"Opening {action} link...", show_alert=False)
+    except Exception as e:
+        logger.exception("Failed to handle stream/download callback %s", q.data)
+        await q.answer("Unable to open that link right now.", show_alert=True)

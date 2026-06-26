@@ -20,6 +20,18 @@ def _resolve_db_url() -> str:
 class SQLStore:
     def __init__(self):
         self.url = _resolve_db_url()
+        connect_args = {}
+        if self.url.startswith("sqlite"):
+            connect_args = {"check_same_thread": False}
+        else:
+            connect_args = {
+                "connect_timeout": 10,
+                "application_name": "ShobanaFilterBot",
+                "keepalives": 1,
+                "keepalives_idle": 30,
+                "keepalives_interval": 10,
+                "keepalives_count": 5,
+            }
         self.engine = create_engine(
             self.url,
             future=True,
@@ -28,14 +40,7 @@ class SQLStore:
             pool_size=5,
             max_overflow=10,
             pool_timeout=30,
-            connect_args={
-                "connect_timeout": 10,
-                "application_name": "ShobanaFilterBot",
-                "keepalives": 1,
-                "keepalives_idle": 30,
-                "keepalives_interval": 10,
-                "keepalives_count": 5,
-            },
+            connect_args=connect_args,
         )
         self._ensure_tables()
 
