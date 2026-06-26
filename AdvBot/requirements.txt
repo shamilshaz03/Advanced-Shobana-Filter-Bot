@@ -1,0 +1,10 @@
+pyrogram==2.0.106
+tgcrypto
+motor
+dnspython
+aiohttp
+pytz
+jinja2
+pymongo
+SQLAlchemy
+psycopg2-binary
